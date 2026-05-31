@@ -13,3 +13,5 @@ __pycache__/
 
 # Node
 node_modules/
+eval7.py
+__pycache__/
