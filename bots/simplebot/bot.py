@@ -37,7 +37,7 @@ import random
 import time
 import math
 
-BOT_NAME = "simpleBot"
+BOT_NAME = "SimpleBotV2"
 
 # Engine constants (see engine/game.py). Hard-coded so we never depend on
 # the engine module at runtime.
@@ -359,13 +359,16 @@ def _preflop(state, hole, owed, pot, can_check, my_stack, my_bet,
             return {"action": "check"}
         return {"action": "fold"}
 
-    # Position-based opening requirement.
-    if pos < 0.34:   min_open = 2      # early: only strong+
-    elif pos < 0.67: min_open = 1      # middle
-    else:            min_open = 1      # CO/BTN: open playable+
+    # Position-based opening requirement (TIGHTENED — real-field analysis showed
+    # the winners play ~5-21% VPIP while we were ~32% and bleeding from weak
+    # showdowns). Open STRONG (tier>=2, ~10%) from early & middle; widen to
+    # playable (tier>=1, ~22%) only on CO/BTN. In 6-max _position: BTN=1.0,
+    # CO=0.8, HJ=0.6, UTG=0.4, blinds<=0.2.
+    if pos < 0.67:
+        min_open = 2      # UTG..HJ: strong+ only
+    else:
+        min_open = 1      # CO/BTN: playable+
 
-    # Exploit: if the table folds a lot, widen our steals in late position.
-    steal_spot = (not facing_raise) and pos >= 0.6
     overfold = ftb is not None and ftb > 0.55
 
     if not facing_raise:
@@ -373,14 +376,11 @@ def _preflop(state, hole, owed, pot, can_check, my_stack, my_bet,
         open_size = _raise_to(state, 1.0)   # ~pot-sized (3x-ish on an open)
         if tier >= min_open:
             return {"action": "raise", "amount": open_size}
-        if tier >= 1 and pos >= 0.6:
+        # Blind steal with junk ONLY vs a PROVEN over-folder, and only on the
+        # button. No more random steals into unknowns — that was a big chunk of
+        # our excess VPIP and the marginal pots that bled us.
+        if pos >= 0.9 and overfold and random.random() < 0.45:
             return {"action": "raise", "amount": open_size}
-        # L4 mixed steal: in the cutoff/button, raise some junk as a bluff,
-        # more when the table over-folds. Pure randomisation -> unexploitable.
-        if steal_spot:
-            steal_p = 0.65 if overfold else 0.30
-            if random.random() < steal_p:
-                return {"action": "raise", "amount": open_size}
         if can_check:
             return {"action": "check"}
         return {"action": "fold"}
