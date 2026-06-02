@@ -298,7 +298,12 @@ def _preflop(state, hole, owed, pot, can_check, my_stack, my_bet,
 
 
 # ─── postflop ──────────────────────────────────────────────────────────────
-_STREET_DISCOUNT = {"flop": 0.05, "turn": 0.09, "river": 0.14}
+# Equity discount vs a betting range, by street. Flop bets are wide (cbets,
+# draws) so we barely discount; turn/river bets are far more honest. Only
+# applied to sizeable bets and dialled down vs loose/maniac opponents — so it
+# targets honest value bets (the leak that beats simpleBot) without making us
+# fold to the weak field's small/random bets.
+_STREET_DISCOUNT = {"flop": 0.0, "turn": 0.06, "river": 0.12}
 
 
 def _postflop(state, hole, board, owed, pot, can_check, my_stack,
@@ -328,11 +333,17 @@ def _postflop(state, hole, board, owed, pot, can_check, my_stack,
     eff_eq = eq
     if owed > 0:
         bet_frac = min(owed / pot, 1.5) if pot > 0 else 1.0
-        disc = _STREET_DISCOUNT.get(street, 0.05) * (0.5 + 0.6 * bet_frac)
+        base = _STREET_DISCOUNT.get(street, 0.0)
+        # Only discount sizeable bets; small bets are too wide to fear.
+        if bet_frac < 0.45:
+            base *= 0.3
+        disc = base * (0.6 + 0.5 * bet_frac)
         if maniac:
-            disc *= 0.35
+            disc *= 0.25           # their bets are mostly air — barely discount
         elif station:
-            disc *= 0.75
+            disc *= 0.6
+        elif ftb is None:
+            disc *= 0.7            # no read yet — don't over-fold
         eff_eq = eq - disc
 
     strong = eq >= 0.72 + mw
@@ -342,18 +353,11 @@ def _postflop(state, hole, board, owed, pot, can_check, my_stack,
     # ---- Checked to us ----
     if can_check:
         if strong:
-            # POLARIZED value: bet big on the river (taxes over-callers like
-            # simpleBot), pot-sized vs stations, standard otherwise.
-            if street == "river":
-                frac = 1.1 if station else 0.95
-            else:
-                frac = 1.25 if station else 0.8
+            frac = 1.25 if station else 0.8
             return {"action": "raise", "amount": _raise_to(state, frac)}
         if good:
-            # Thin value, but on the river check back medium hands more often
-            # (pot control — they only call/raise with better).
-            betp = 0.6 if street == "river" else 0.85
-            if random.random() < betp:
+            # Thin value — keep betting for value against this calling field.
+            if random.random() < 0.85:
                 return {"action": "raise", "amount": _raise_to(state, 0.6)}
             return {"action": "check"}
         if marginal:
@@ -372,8 +376,9 @@ def _postflop(state, hole, board, owed, pot, can_check, my_stack,
         return {"action": "raise", "amount": _raise_to(state, frac)}
 
     if good:
+        # Good hands keep FULL equity (don't fold value) — call/raise for value.
         margin = -0.02 if maniac else 0.04 + mw
-        if eff_eq > breakeven + margin:
+        if eq > breakeven + margin:
             if not maniac and random.random() < 0.35 and owed <= pot * 0.9:
                 return {"action": "raise", "amount": _raise_to(state, 0.7)}
             return {"action": "call"}

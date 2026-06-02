@@ -47,7 +47,7 @@ CARD FORMAT:
   Suits: s (spades) h (hearts) d (diamonds) c (clubs)
 
 RETURN FORMAT:
-  {"action": "fold"}
+  {"action": "fold"}ome
   {"action": "check"}          # only valid when amount_owed == 0
   {"action": "call"}
   {"action": "raise", "amount": 1200}   # amount = TOTAL bet, not raise-by

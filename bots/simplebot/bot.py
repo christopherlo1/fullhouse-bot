@@ -339,14 +339,21 @@ def _preflop(state, hole, owed, pot, can_check, my_stack, my_bet,
     if owed > 0 and owed >= 0.25 * my_stack:
         eq = _equity(hole, [], n_opp, deadline, max_iters=1500)
         breakeven = owed / (pot + owed)
-        # Calling a shove risks `owed` to win the current pot; we want a
-        # cushion that grows with the number of opponents (more ways to lose).
-        margin = 0.01 + 0.04 * (n_opp - 1)
+        # RISK-SCALED MARGIN (anti-wipe). The more of our stack a call commits,
+        # the bigger the equity edge we demand. Stacking off at ~51% is barely
+        # +EV but wildly high-variance — that's exactly how a bot gets wiped.
+        # We insist on a real edge for big commitments, AND add a cushion per
+        # extra opponent (more ways to lose).
+        risk = min(owed / max(my_stack, 1), 1.0)        # fraction of stack at risk
+        margin = 0.05 + 0.07 * risk + 0.04 * (n_opp - 1)
+        # Exception: vs a PROVEN maniac, their shove range is genuinely wide,
+        # so calling thin is correct — relax the margin back down.
+        if af is not None and af > 1.8:
+            margin *= 0.4
         if eq >= breakeven + margin:
             return {"action": "call"}
-        # Re-shove our very best even if pot odds alone don't justify a call
-        # (fold equity). Otherwise let it go.
-        if tier >= 3 and eq >= breakeven - 0.03:
+        # Premiums still call near break-even (they have the equity).
+        if tier >= 3 and eq >= breakeven:
             return {"action": "call"}
         if can_check:
             return {"action": "check"}
@@ -432,6 +439,27 @@ def _postflop(state, hole, board, owed, pot, can_check, my_stack,
     else:
         bluff_mult = 0.85          # normal opponent
 
+    # RANGE-AWARE EQUITY for HERO-CALL spots only. A big turn/river bet is far
+    # more honest than a random hand, so we discount our equity before deciding
+    # whether to call off a MARGINAL/WEAK hand. Value hands (good/strong) keep
+    # full equity so we still extract. This stops us paying off big rivers —
+    # the single worst leak of an equity-vs-random bot. Discount shrinks vs
+    # maniacs (their bets are air) and small bets (too wide to fear).
+    eff_eq = eq
+    if owed > 0:
+        st_disc = {"flop": 0.03, "turn": 0.06, "river": 0.12}.get(state["street"], 0.0)
+        bet_frac = min(owed / pot, 1.5) if pot > 0 else 1.0
+        if bet_frac < 0.45:
+            st_disc *= 0.3
+        disc = st_disc * (0.6 + 0.5 * bet_frac)
+        if maniac:
+            disc *= 0.25
+        elif station:
+            disc *= 0.6
+        elif ftb is None:
+            disc *= 0.7
+        eff_eq = eq - disc
+
     strong   = eq >= 0.72 + mw
     good     = 0.55 + mw <= eq < 0.72 + mw
     marginal = 0.40 + mw <= eq < 0.55 + mw
@@ -459,42 +487,54 @@ def _postflop(state, hole, board, owed, pot, can_check, my_stack,
         return {"action": "check"}
 
     # ---- Facing a bet ----
+    # COMMITMENT GUARD (anti-bust). The more of our stack this call/raise
+    # commits, the bigger the range-aware equity edge we demand. Stacking off
+    # with a hand that only beats RANDOM is how we get to -10,000. All facing-
+    # bet decisions use eff_eq (range-discounted) and add this margin. Relaxed
+    # vs a proven maniac (their betting range really is junk).
+    commit = owed / max(my_stack + state["your_bet_this_street"], 1)
+    commit_margin = 0.0
+    if commit > 0.40:
+        commit_margin = 0.06 + 0.18 * (commit - 0.40)   # grows toward ~0.17 at full stack
+    if maniac:
+        commit_margin *= 0.35
+
     if strong:
-        # Raise for value. Smaller vs a maniac (let them keep bluffing /
-        # don't blow them off air); a touch of size jitter is built in.
+        # For a big commitment, make sure RANGE-AWARE equity still backs the
+        # stack-off — a hand that's only "strong vs random" can be crushed by a
+        # shove range. If not, just call when priced; never raise into it.
+        if commit > 0.45 and eff_eq < 0.62:
+            if eff_eq > breakeven + commit_margin * 0.5:
+                return {"action": "call"}
+            return {"action": "fold"}
         frac = 0.7 if maniac else 0.85
-        # Occasionally just call with a monster to trap, more vs aggressors.
         if random.random() < (0.30 if maniac else 0.15):
             return {"action": "call"}
         return {"action": "raise", "amount": _raise_to(state, frac)}
 
     if good:
-        # vs a maniac, LOOSEN: their bets are mostly air, demand less margin.
-        margin = -0.02 if maniac else 0.05 + mw
-        if eq > breakeven + margin:
-            # Raise good hands for value/protection more often now.
-            if not maniac and random.random() < 0.40 and owed <= pot * 0.9:
+        margin = (-0.02 if maniac else 0.05 + mw) + commit_margin
+        if eff_eq > breakeven + margin:
+            if (not maniac and commit < 0.35 and random.random() < 0.35
+                    and owed <= pot * 0.9):
                 return {"action": "raise", "amount": _raise_to(state, 0.7)}
             return {"action": "call"}
         return {"action": "fold"}
 
     if marginal:
-        # Tricky: vs a folder, sometimes RAISE as a semibluff (fold equity plus
-        # our own outs) rather than meekly calling. Not vs maniacs (they call
-        # /reraise) or stations (won't fold).
-        if (overfold and not maniac and owed <= pot * 0.7
-                and random.random() < 0.25):
+        # vs a folder, occasionally semibluff-raise (small commitments only).
+        if (overfold and not maniac and owed <= pot * 0.6
+                and commit < 0.30 and random.random() < 0.22):
             return {"action": "raise", "amount": _raise_to(state, 0.8)}
         if maniac:
-            if eq > breakeven and owed <= pot:
+            if eff_eq > breakeven + commit_margin and owed <= pot:
                 return {"action": "call"}
             return {"action": "fold"}
-        if eq > breakeven + 0.06 + mw and owed <= pot * 0.6:
+        if eff_eq > breakeven + 0.06 + mw + commit_margin and owed <= pot * 0.55:
             return {"action": "call"}
         return {"action": "fold"}
 
-    # weak: fold. A dead hand is dead even vs a maniac. Only a cheap call with
-    # some equity (priced-in draw) sees another card.
-    if eq > breakeven + 0.10 and owed <= pot * 0.3:
+    # weak: fold. Only a cheap, small-commitment call with live equity.
+    if eff_eq > breakeven + 0.10 + commit_margin and owed <= pot * 0.3 and commit < 0.25:
         return {"action": "call"}
     return {"action": "fold"}
