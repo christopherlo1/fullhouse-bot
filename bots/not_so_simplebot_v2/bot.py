@@ -307,9 +307,14 @@ def _fragile(hole, board):
         return True
     if cat == 2:
         hr = [_RVAL[str(c)[0]] for c in hole]
-        if hr[0] == hr[1]:
-            return False                     # pocket pair + board pair (overpair-ish)
         br = sorted((_RVAL[str(c)[0]] for c in board), reverse=True)
+        if hr[0] == hr[1]:
+            # Pocket pair that made two pair WITH a board pair. Strong only if it
+            # is an overpair to that board pair; if the board is paired ABOVE our
+            # pocket pair (e.g. 66 on K-K-x, or JJ on K-K-x) we are dominated by
+            # anyone holding the board card — that's a fragile counterfeit.
+            board_pairs = [r for r in set(br) if br.count(r) >= 2]
+            return any(r > hr[0] for r in board_pairs)
         ours = [r for r in hr if r in br]
         if len(ours) >= 2:
             return False                     # both our cards pair the board: real 2 pair
@@ -592,14 +597,18 @@ def _postflop(state, hole, board, owed, pot, can_check, my_stack,
 
     # FRAGILE-HAND HAIRCUT (V2): equity-vs-random overrates one pair / ace-high /
     # counterfeit two-pair the most, and that's exactly what was paying off the
-    # big turn/river bets that bust us. Add a bet-size- and raise-scaled penalty
-    # so these hands fold to sustained or large pressure but still take cheap
-    # showdowns. Only on later streets (flop one-pair has draw equity & is cheap).
-    if frag and late:
+    # big bets that bust us. Add a bet-size- and raise-scaled penalty so these
+    # hands fold to sustained or large pressure but still take cheap showdowns.
+    # Applied on the flop too (at half weight — flop hands keep draw equity and
+    # the pot is smaller), so we can also lay down weak one-pair to a big flop
+    # bet/raise, not just on the turn and river.
+    if frag:
         wk = 0.11 if _made_cat(hole, board) <= 1 else 0.07
         wk *= (0.55 + 0.9 * bet_frac)
         if raised:
             wk += 0.07
+        if street == "flop":
+            wk *= 0.5
         pen += wk
 
     if maniac:
@@ -617,12 +626,14 @@ def _postflop(state, hole, board, owed, pot, can_check, my_stack,
     # Value — strong even after the range haircut.
     if req >= 0.66:
         big_commit = commit > 0.5 or (raised and bet_frac >= 0.7)
-        # A fragile made hand on a later street is NEVER a stack-off and is NEVER
-        # turned into a pot-committing raise versus a nuts-weighted range: call if
-        # the price is still fine, otherwise fold. Only sets+ (or monster equity)
-        # go to war. This is the core anti-bust rule — it folds the A9 that jammed
-        # 29k, the middle-pair barrels, the second-pair call-downs.
-        if frag and late:
+        # A fragile made hand is NEVER a stack-off and is NEVER re-jammed versus a
+        # nuts-weighted range: call if the price is still fine, otherwise fold.
+        # Only sets+ (or monster equity) go to war. This is the core anti-bust
+        # rule — it folds the A9 that jammed 29k, the middle-pair barrels and the
+        # second-pair call-downs. We apply it on the turn/river always, and on the
+        # flop once we FACE A RAISE (the check-raise-jam war), while still leaving
+        # ordinary flop c-bets/leads with one pair alone.
+        if frag and (late or raised):
             if (req >= need and not (big_bet and req < call_floor)
                     and bet_frac <= 1.1 and not (raised and bet_frac >= 0.9)):
                 return {"action": "call"}
